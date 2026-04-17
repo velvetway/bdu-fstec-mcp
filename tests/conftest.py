@@ -112,6 +112,7 @@ CREATE TABLE vulnerabilities (
     description      TEXT,
     software_names   TEXT,
     vendors          TEXT,
+    cves_joined      TEXT,
     severity         TEXT,
     severity_level   INTEGER,
     cvss_score       REAL,
@@ -128,9 +129,12 @@ CREATE TABLE vulnerabilities (
     has_fix          INTEGER NOT NULL DEFAULT 0,
     sources          TEXT
 );
-CREATE INDEX idx_vul_severity ON vulnerabilities(severity_level);
-CREATE INDEX idx_vul_cvss     ON vulnerabilities(cvss_score);
-CREATE INDEX idx_vul_year     ON vulnerabilities(identify_year);
+CREATE INDEX idx_vul_severity      ON vulnerabilities(severity_level);
+CREATE INDEX idx_vul_cvss          ON vulnerabilities(cvss_score);
+CREATE INDEX idx_vul_year          ON vulnerabilities(identify_year);
+CREATE INDEX idx_vul_year_cvss     ON vulnerabilities(identify_year, cvss_score DESC);
+CREATE INDEX idx_vul_severity_cvss ON vulnerabilities(severity_level, cvss_score DESC);
+CREATE INDEX idx_vul_cvss_year     ON vulnerabilities(cvss_score DESC, identify_year);
 
 CREATE TABLE cves (
     bdu_id TEXT NOT NULL,
@@ -155,7 +159,7 @@ CREATE TABLE cwes (
 );
 
 CREATE VIRTUAL TABLE vulnerabilities_fts USING fts5(
-    name, description, software_names, vendors,
+    name, description, software_names, vendors, cves_joined,
     content = 'vulnerabilities', content_rowid = 'rowid',
     tokenize = "unicode61 remove_diacritics 2"
 );
@@ -172,11 +176,11 @@ def build_sample_db(path: Path, snapshot_date: str = "2026-04-18") -> None:
     for rowid, v in enumerate(SAMPLE_VULS, start=1):
         conn.execute(
             """INSERT INTO vulnerabilities
-               (rowid, id, name, description, software_names, vendors,
+               (rowid, id, name, description, software_names, vendors, cves_joined,
                 severity, severity_level, cvss_score, cvss_vector,
                 identify_date, publication_date, last_upd_date, identify_year,
                 solution, status, exploit_status, fix_status, has_exploit, has_fix, sources)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 rowid,
                 v["id"],
@@ -184,6 +188,7 @@ def build_sample_db(path: Path, snapshot_date: str = "2026-04-18") -> None:
                 v["description"],
                 " ".join(s[0] for s in v["software"]),
                 " ".join(s[1] for s in v["software"]),
+                " ".join(v["cves"]),
                 v["severity"],
                 v["severity_level"],
                 v["cvss_score"],
@@ -219,7 +224,7 @@ def build_sample_db(path: Path, snapshot_date: str = "2026-04-18") -> None:
     conn.execute("INSERT INTO vulnerabilities_fts(vulnerabilities_fts) VALUES('rebuild')")
     conn.execute("INSERT INTO metadata(key, value) VALUES ('snapshot_date', ?)", (snapshot_date,))
     conn.execute("INSERT INTO metadata(key, value) VALUES ('total', ?)", (str(len(SAMPLE_VULS)),))
-    conn.execute("INSERT INTO metadata(key, value) VALUES ('schema_version', '1')")
+    conn.execute("INSERT INTO metadata(key, value) VALUES ('schema_version', '3')")
     conn.commit()
     conn.close()
 

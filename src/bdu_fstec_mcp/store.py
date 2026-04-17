@@ -18,21 +18,64 @@ from ._config import DEFAULT_BDU_PAGE_URL
 from .models import SnapshotInfo, Software, Vulnerability
 
 
-FTS_SAFE_CHARS = re.compile(r"[^0-9a-zA-Zа-яА-ЯёЁ\s\-_.]")
+# Characters NOT in this whitelist are replaced with spaces before tokenizing.
+# Notably, ``-``, ``_``, ``.`` are stripped too because FTS5's unicode61
+# tokenizer treats them as separators anyway, and keeping them would make
+# us send quoted phrases that never match the tokenized content.
+FTS_SAFE_CHARS = re.compile(r"[^0-9a-zA-Zа-яА-ЯёЁ\s]")
+FTS_RESERVED = {"AND", "OR", "NOT", "NEAR"}
+
+SUPPORTED_SCHEMA_VERSION = "3"
+
+
+class SchemaVersionMismatch(RuntimeError):
+    """Local SQLite was built by a different, incompatible build script."""
+
+
+_CYRILLIC = re.compile(r"[а-яёА-ЯЁ]")
+
+
+def _to_prefix(token: str) -> str:
+    """Turn a plain word into a lenient FTS5 prefix pattern.
+
+    Russian words inflect via suffixes (``инъекция`` → ``инъекции`` →
+    ``инъекцией`` …). A trailing 2-character slice off any Cyrillic word
+    long enough to afford it catches the main inflection forms without a
+    real morphology engine. Latin words are used as-is because FTS5's
+    unicode61 tokenizer already lowercases them and they inflect less.
+    """
+    if _CYRILLIC.search(token) and len(token) >= 6:
+        return f"{token[:-2]}*"
+    if len(token) >= 3:
+        return f"{token}*"
+    return token
 
 
 def _escape_fts_query(query: str) -> str:
     """Produce a safe FTS5 MATCH expression from arbitrary user input.
 
-    Every token is wrapped in double quotes so FTS5 metacharacters (``AND``,
-    ``OR``, ``NOT``, ``*``, ``"``) lose their special meaning. Multi-word
-    queries become an implicit AND: ``Astra Linux`` → ``"astra" "linux"``.
+    Strategy:
+
+    * Unsafe characters (FTS5 metacharacters, quotes, parens, etc.) are
+      stripped so the caller's input cannot escape into operator syntax.
+    * Alphanumeric tokens become lenient prefix matches via ``_to_prefix``.
+    * Tokens that are FTS5 reserved words (``AND``, ``OR``, ``NOT``,
+      ``NEAR``) or contain characters like ``.`` / ``-`` / ``_`` fall back
+      to a literal quoted phrase, which matches the exact token.
     """
     cleaned = FTS_SAFE_CHARS.sub(" ", query)
     tokens = [t for t in cleaned.split() if t]
     if not tokens:
         return ""
-    return " ".join(f'"{t}"' for t in tokens)
+    parts: list[str] = []
+    for t in tokens:
+        if t.upper() in FTS_RESERVED:
+            parts.append(f'"{t}"')
+        elif t.isalnum() and len(t) >= 2:
+            parts.append(_to_prefix(t))
+        else:
+            parts.append(f'"{t}"')
+    return " ".join(parts)
 
 
 class Store:
@@ -48,6 +91,17 @@ class Store:
         conn.execute("PRAGMA query_only = 1")
         conn.execute("PRAGMA temp_store = MEMORY")
         conn.execute("PRAGMA mmap_size = 268435456")  # 256 MB mmap
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key = 'schema_version'"
+        ).fetchone()
+        version = row["value"] if row else ""
+        if version != SUPPORTED_SCHEMA_VERSION:
+            conn.close()
+            raise SchemaVersionMismatch(
+                f"SQLite snapshot has schema_version={version!r}, "
+                f"this build of bdu-fstec-mcp requires {SUPPORTED_SCHEMA_VERSION!r}. "
+                f"Run `bdu-fstec-mcp refresh` to pull a rebuilt snapshot."
+            )
         self._conn = conn
 
     def close(self) -> None:
@@ -120,14 +174,20 @@ class Store:
 
         if match:
             sql = (
-                "SELECT v.rowid AS rowid FROM vulnerabilities_fts f "
+                "SELECT v.rowid AS rowid, "
+                "  COALESCE(NULLIF(snippet(vulnerabilities_fts, 1, '«', '»', '…', 20), ''), "
+                "           snippet(vulnerabilities_fts, 0, '«', '»', '…', 20)) AS snippet "
+                "FROM vulnerabilities_fts f "
                 "JOIN vulnerabilities v ON v.rowid = f.rowid "
                 "WHERE vulnerabilities_fts MATCH ?"
             )
             params.append(match)
             order = "ORDER BY rank"
         else:
-            sql = "SELECT v.rowid AS rowid FROM vulnerabilities v WHERE 1=1"
+            sql = (
+                "SELECT v.rowid AS rowid, '' AS snippet "
+                "FROM vulnerabilities v WHERE 1=1"
+            )
             order = "ORDER BY v.cvss_score DESC"
 
         if min_cvss is not None:
@@ -160,7 +220,10 @@ class Store:
         if not rows:
             return []
         rowids = [r["rowid"] for r in rows]
-        return self._hydrate(conn, rowids, preserve_order=True)
+        snippets = {r["rowid"]: (r["snippet"] or "") for r in rows}
+        return self._hydrate(
+            conn, rowids, preserve_order=True, snippets=snippets
+        )
 
     def _get_sync(self, bdu_id: str) -> Vulnerability | None:
         conn = self._conn_or_open()
@@ -221,6 +284,7 @@ class Store:
         conn: sqlite3.Connection,
         rowids: Iterable[int],
         preserve_order: bool = False,
+        snippets: dict[int, str] | None = None,
     ) -> list[Vulnerability]:
         rowids = list(rowids)
         if not rowids:
@@ -273,6 +337,7 @@ class Store:
                     cves=tuple(cves_map.get(bdu_id, [])),
                     cwes=tuple(cwes_map.get(bdu_id, [])),
                     software=tuple(software_map.get(bdu_id, [])),
+                    match_snippet=(snippets or {}).get(row["rowid"], ""),
                 )
             )
         return vulns

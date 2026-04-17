@@ -161,10 +161,29 @@ async def test_search_limit_clamped_low(sample_db: Path):
 
 
 async def test_fts_escape_handles_injection():
-    # FTS5 would interpret these as operators without quoting.
-    assert _escape_fts_query('OR "dangerous') == '"OR" "dangerous"'
-    assert _escape_fts_query("foo*bar AND baz") == '"foo" "bar" "AND" "baz"'
+    # Reserved words remain quoted (exact match, never operator).
+    assert _escape_fts_query('OR "dangerous') == '"OR" dangerous*'
+    assert _escape_fts_query("foo*bar AND baz") == 'foo* bar* "AND" baz*'
     assert _escape_fts_query("") == ""
+
+
+async def test_fts_escape_cyrillic_trims_suffix():
+    # Long Cyrillic word (≥6) → last 2 chars dropped for inflection tolerance.
+    # "инъекция" (len 8) → "инъекц*" (matches инъекция, инъекции, …).
+    assert _escape_fts_query("инъекция") == "инъекц*"
+    assert _escape_fts_query("удалённое выполнение") == "удалённ* выполнен*"
+
+
+async def test_fts_escape_short_cyrillic_kept_as_prefix():
+    # Words too short to afford suffix trimming → plain prefix (≥3 chars).
+    assert _escape_fts_query("код") == "код*"
+
+
+async def test_fts_escape_splits_hyphenated_ids():
+    # Hyphens/underscores are separators for FTS5's unicode61 tokenizer,
+    # so matching any CVE or package name must decompose the identifier.
+    assert _escape_fts_query("CVE-2024-1086") == "CVE* 2024* 1086*"
+    assert _escape_fts_query("nft_verdict_init") == "nft* verdict* init*"
 
 
 async def test_cyrillic_fts_tokenization(sample_db: Path):
@@ -189,3 +208,22 @@ async def test_combined_filters(sample_db: Path):
     finally:
         store.close()
     assert {v.id for v in results} == {"BDU:2024-00001"}
+
+
+async def test_fts_snippet_populated(sample_db: Path):
+    store = await _make_store(sample_db)
+    try:
+        results = await store.search("PostgreSQL", limit=3)
+    finally:
+        store.close()
+    assert results, "expected FTS hits"
+    assert any("«" in v.match_snippet and "»" in v.match_snippet for v in results)
+
+
+async def test_empty_query_has_no_snippet(sample_db: Path):
+    store = await _make_store(sample_db)
+    try:
+        results = await store.search("", limit=2)
+    finally:
+        store.close()
+    assert all(v.match_snippet == "" for v in results)

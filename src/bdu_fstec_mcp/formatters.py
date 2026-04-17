@@ -36,8 +36,9 @@ def format_short(v: Vulnerability) -> str:
     if v.status:
         lines.append(f"  Статус: {v.status}")
     lines.append(f"  {v.url}")
-    if v.description:
-        lines.append(f"  {_truncate(v.description, _DESC_PREVIEW_LIMIT)}")
+    body = v.match_snippet or v.description
+    if body:
+        lines.append(f"  {_truncate(body, _DESC_PREVIEW_LIMIT)}")
     return "\n".join(lines)
 
 

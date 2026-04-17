@@ -36,6 +36,8 @@ class Vulnerability:
     cves: tuple[str, ...] = field(default_factory=tuple)
     cwes: tuple[str, ...] = field(default_factory=tuple)
     software: tuple[Software, ...] = field(default_factory=tuple)
+    match_snippet: str = ""  # FTS5 snippet() output; empty unless the vul
+    # was returned by a full-text search
 
 
 @dataclass(frozen=True)
