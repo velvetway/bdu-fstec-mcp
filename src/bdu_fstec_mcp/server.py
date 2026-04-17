@@ -8,7 +8,7 @@ from typing import Any
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import TextContent, Tool, ToolAnnotations
 
 from ._config import Config
 from .cache import CacheManager
@@ -149,69 +149,154 @@ class BduServer:
 def _build_mcp_server(bdu: BduServer) -> Server:
     server: Server = Server("bdu-fstec-mcp")
 
+    READ_ONLY = ToolAnnotations(
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+
     @server.list_tools()
     async def list_tools() -> list[Tool]:
         return [
             Tool(
                 name="search_bdu_vulnerabilities",
+                title="Search БДУ ФСТЭК vulnerabilities",
                 description=(
-                    "Поиск по БДУ ФСТЭК с релевантностным ранжированием (FTS5). "
-                    "Поддерживает полнотекстовый запрос и фильтры: CVSS, "
-                    "уровень опасности, год обнаружения, вендор, наличие эксплойта."
+                    "Поиск уязвимостей в БДУ ФСТЭК (Банк данных угроз "
+                    "безопасности информации России) по полнотекстовому "
+                    "запросу с FTS5-ранжированием (BM25) и опциональным "
+                    "фильтрам. Индекс содержит ~86 000 записей: заголовок, "
+                    "описание, уязвимое ПО, вендор, CVE-идентификаторы. "
+                    "Все результаты read-only (локальная SQLite-копия), "
+                    "без побочных эффектов и сетевых запросов. Пустой query "
+                    "+ фильтры → сортировка по CVSS DESC. Возвращает до 100 "
+                    "результатов с идентификатором БДУ, оценкой CVSS, "
+                    "списком ПО, ссылкой на bdu.fstec.ru и сниппетом с "
+                    "подсветкой матча. Применение: поиск аналога CVE в "
+                    "российской БД, подбор уязвимостей по вендору (Astra "
+                    "Linux, ЛК, Positive Technologies и т.д.), фильтрация "
+                    "для моделей угроз 187-ФЗ / ГОСТ Р 57580. Ошибки: "
+                    "недоступность зеркала при первом запуске — сообщение "
+                    "с рекомендацией `bdu-fstec-mcp refresh`."
                 ),
+                annotations=READ_ONLY,
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "query": {
                             "type": "string",
                             "description": (
-                                "Поисковая фраза (русский или английский). "
-                                "Пример: «SQL injection», «Astra Linux», «OpenSSL heap»."
+                                "Полнотекстовый запрос (русский или "
+                                "английский). Токены автоматически "
+                                "превращаются в префиксный поиск с "
+                                "обрезкой окончания для кириллицы, так "
+                                "что «инъекция» находит «инъекции» и "
+                                "«инъекцией». Примеры: «SQL injection», "
+                                "«Astra Linux kernel», «OpenSSL heap "
+                                "overflow», «CVE-2024-1086»."
                             ),
+                            "examples": [
+                                "SQL injection",
+                                "Astra Linux",
+                                "CVE-2024-1086",
+                            ],
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "Максимум результатов (1–100).",
+                            "description": (
+                                "Максимум записей в выдаче, 1–100. "
+                                "Увеличение не замедляет запрос."
+                            ),
                             "default": 10,
                             "minimum": 1,
                             "maximum": 100,
                         },
                         "min_cvss": {
                             "type": "number",
-                            "description": "Минимальная оценка CVSS (0–10).",
+                            "description": (
+                                "Минимальная базовая оценка CVSS. "
+                                "Используй 7.0 для «высоких», 9.0 для "
+                                "«критических». Диапазон 0–10."
+                            ),
+                            "minimum": 0,
+                            "maximum": 10,
                         },
                         "min_severity": {
                             "type": "string",
-                            "description": "Минимальный уровень опасности.",
-                            "enum": ["низкий", "средний", "высокий", "критический"],
+                            "description": (
+                                "Минимальный уровень опасности по ФСТЭК. "
+                                "Если нужны только критические — "
+                                "используй «критический»."
+                            ),
+                            "enum": [
+                                "низкий",
+                                "средний",
+                                "высокий",
+                                "критический",
+                            ],
                         },
                         "year": {
                             "type": "integer",
-                            "description": "Год обнаружения уязвимости.",
+                            "description": (
+                                "Календарный год обнаружения уязвимости "
+                                "(по идентификатору BDU:YYYY-NNNNN)."
+                            ),
+                            "minimum": 2014,
                         },
                         "vendor": {
                             "type": "string",
-                            "description": "Фрагмент имени вендора (подстрока).",
+                            "description": (
+                                "Фрагмент имени вендора (case-insensitive "
+                                "подстрока). «Астра» → найдёт всё "
+                                "от РусБИТех-Астра и т.п."
+                            ),
                         },
                         "has_exploit": {
                             "type": "boolean",
-                            "description": "Только уязвимости с известным эксплойтом.",
+                            "description": (
+                                "true → только уязвимости, для которых "
+                                "ФСТЭК подтвердила существование эксплойта."
+                            ),
                         },
                     },
                 },
             ),
             Tool(
                 name="get_bdu_vulnerability",
+                title="Get one БДУ record by identifier",
                 description=(
-                    "Полная запись по идентификатору БДУ (например, "
-                    "BDU:2024-01234): CVSS, CVE, CWE, решение, эксплойт-статус."
+                    "Возвращает полную запись БДУ по идентификатору "
+                    "`BDU:YYYY-NNNNN` (например, `BDU:2024-01187`). "
+                    "Включает заголовок, описание, CVSS (оба вектора и "
+                    "балл), уровень опасности ФСТЭК, все связанные CVE, "
+                    "CWE, список уязвимого ПО с вендорами и версиями, "
+                    "дату обнаружения / публикации / последнего "
+                    "обновления, рекомендованное решение, статус "
+                    "эксплойта, статус исправления, источники и "
+                    "URL карточки на bdu.fstec.ru. Read-only. Если "
+                    "идентификатор не найден — сообщение об отсутствии; "
+                    "допускает ввод без префикса `BDU:` (добавляется "
+                    "автоматически)."
                 ),
+                annotations=READ_ONLY,
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "bdu_id": {
                             "type": "string",
-                            "description": "Идентификатор БДУ, например 'BDU:2024-01234'.",
+                            "description": (
+                                "Идентификатор БДУ. Принимаются форматы "
+                                "`BDU:2024-01234`, `bdu:2024-01234`, или "
+                                "просто `2024-01234`."
+                            ),
+                            "pattern": "^(BDU:|bdu:)?\\d{4}-\\d+$",
+                            "examples": [
+                                "BDU:2024-01187",
+                                "2024-01187",
+                            ],
                         }
                     },
                     "required": ["bdu_id"],
@@ -219,16 +304,33 @@ def _build_mcp_server(bdu: BduServer) -> Server:
             ),
             Tool(
                 name="find_bdu_by_cve",
+                title="Map CVE → БДУ",
                 description=(
-                    "Обратный маппинг CVE → БДУ. Находит российские записи, "
-                    "ссылающиеся на указанный CVE-идентификатор."
+                    "Обратный маппинг международного CVE-идентификатора "
+                    "в российские записи БДУ. Полезно для "
+                    "cross-reference международных advisory ↔ локальных "
+                    "compliance-документов (187-ФЗ, ГОСТ Р 57580, "
+                    "паспорта КИИ). Одному CVE может соответствовать "
+                    "несколько записей БДУ (разные пакеты, ОС, версии). "
+                    "Read-only. Регистр CVE нечувствителен. Если соответствия "
+                    "нет — возвращает сообщение, что запись отсутствует."
                 ),
+                annotations=READ_ONLY,
                 inputSchema={
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "cve_id": {
                             "type": "string",
-                            "description": "Идентификатор CVE, например 'CVE-2024-1234'.",
+                            "description": (
+                                "Идентификатор CVE (case-insensitive). "
+                                "Формат: CVE-YYYY-NNNN или более длинный."
+                            ),
+                            "pattern": "^[Cc][Vv][Ee]-\\d{4}-\\d{4,}$",
+                            "examples": [
+                                "CVE-2024-1086",
+                                "CVE-2023-38180",
+                            ],
                         }
                     },
                     "required": ["cve_id"],
@@ -236,11 +338,24 @@ def _build_mcp_server(bdu: BduServer) -> Server:
             ),
             Tool(
                 name="get_bdu_stats",
+                title="БДУ snapshot statistics",
                 description=(
-                    "Статистика текущего локального снимка БДУ и проверка "
-                    "актуальности относительно зеркала."
+                    "Метаданные текущего локального снимка БДУ: общее "
+                    "число записей, диапазон идентификаторов "
+                    "`BDU:2014-00001 → BDU:YYYY-NNNNN`, дата снимка в "
+                    "зеркале, последнее обновление источника. "
+                    "Автоматически проверяет, не устарел ли локальный "
+                    "кэш относительно зеркала (при наличии сетевого "
+                    "доступа) и советует запустить `bdu-fstec-mcp "
+                    "refresh`, если снимок старше порога (по умолчанию "
+                    "30 дней). Нет побочных эффектов."
                 ),
-                inputSchema={"type": "object", "properties": {}},
+                annotations=READ_ONLY,
+                inputSchema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {},
+                },
             ),
         ]
 
