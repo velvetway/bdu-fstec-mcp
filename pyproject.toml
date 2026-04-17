@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bdu-fstec-mcp"
+version = "0.1.0"
+description = "MCP server that exposes БДУ ФСТЭК (Russian vulnerability database) as tools for Claude and other MCP clients."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "velvetway" }]
+keywords = ["mcp", "claude", "bdu", "fstec", "vulnerability", "cybersecurity", "russia"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+]
+dependencies = [
+  "mcp>=1.0.0",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+]
+
+[project.scripts]
+bdu-fstec-mcp = "bdu_fstec_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/velvetway/bdu-fstec-mcp"
+Repository = "https://github.com/velvetway/bdu-fstec-mcp"
+"Data source" = "https://github.com/velvetway/bdu-fstec-mirror"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bdu_fstec_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
